@@ -1,7 +1,7 @@
 /**
  * Maple Auction MCP Bridge - Background Service Worker (Manifest V3)
  * 역할:
- * 1. 로컬 MCP 서버(ws://127.0.0.1:19595)와 실시간 연결 유지
+ * 1. 로컬 MCP 서버(127.0.0.1:19595 - WebSocket 및 HTTP 폴링 겸용)와 실시간 연결 유지
  * 2. https://auction.maplestory.nexon.com/* 탭 탐색, 활성화(포커스) 및 메시지 중계
  * 3. 읽기/찜/포커스 외의 구매·판매 액션 차단 가드
  */
@@ -23,6 +23,42 @@ const ALLOWED_ACTIONS = new Set([
 let socket = null;
 let isConnected = false;
 let latestAuctionStatus = null;
+
+async function syncHttpHeartbeatAndPoll() {
+  try {
+    if (latestAuctionStatus) {
+      const hbRes = await fetch(`${HTTP_BASE}/bridge/heartbeat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(latestAuctionStatus),
+      });
+      if (hbRes.ok) {
+        isConnected = true;
+        chrome.storage.local.set({ mcpBridgeConnected: true });
+      }
+    }
+
+    const pollRes = await fetch(`${HTTP_BASE}/bridge/poll`, { method: 'GET' });
+    if (pollRes.ok) {
+      isConnected = true;
+      chrome.storage.local.set({ mcpBridgeConnected: true });
+      const data = await pollRes.json();
+      if (data && data.request && data.request.requestId) {
+        const response = await handleBridgeRequest(data.request);
+        await fetch(`${HTTP_BASE}/bridge/respond`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(response),
+        });
+      }
+    }
+  } catch {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      isConnected = false;
+      chrome.storage.local.set({ mcpBridgeConnected: false });
+    }
+  }
+}
 
 function connectWebSocket() {
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
@@ -60,16 +96,14 @@ function connectWebSocket() {
     };
 
     socket.onclose = () => {
-      isConnected = false;
       socket = null;
-      chrome.storage.local.set({ mcpBridgeConnected: false });
     };
 
     socket.onerror = () => {
-      isConnected = false;
+      socket = null;
     };
   } catch {
-    isConnected = false;
+    socket = null;
   }
 }
 
@@ -168,9 +202,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'HEARTBEAT', status: latestAuctionStatus }));
-    } else {
-      connectWebSocket();
     }
+    syncHttpHeartbeatAndPoll();
     sendResponse({ ok: true });
     return false;
   }
@@ -187,6 +220,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return false;
 });
 
-// 주기적 재연결 타이머
-setInterval(connectWebSocket, 4000);
+setInterval(() => {
+  connectWebSocket();
+  syncHttpHeartbeatAndPoll();
+}, 2500);
 connectWebSocket();
+syncHttpHeartbeatAndPoll();

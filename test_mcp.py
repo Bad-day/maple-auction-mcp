@@ -9,6 +9,7 @@ from mcp_server import (
     MapleAuctionMcpEngine,
     assert_allowed_bridge_action,
     format_meso,
+    parse_auction_banner_tokens,
 )
 
 
@@ -21,25 +22,21 @@ class TestMapleAuctionMcp(unittest.TestCase):
         self.assertEqual(format_meso(185_0000_0000), "185억")
 
     def test_2_security_guard_blocks_purchase_and_sell(self) -> None:
-        # 허용된 액션 통과 확인
         assert_allowed_bridge_action("SEARCH_ITEMS")
         assert_allowed_bridge_action("ADD_WISHLIST")
         assert_allowed_bridge_action("FOCUS_AND_HIGHLIGHT")
 
-        # 직접 구매/판매 관련 액션은 반드시 차단되어야 함
         for forbidden in ["BUY_ITEM", "PURCHASE_CONFIRM", "SELL_REGISTER", "CANCEL_SALE"]:
             with self.assertRaises(ValueError) as ctx:
                 assert_allowed_bridge_action(forbidden)
             self.assertIn("SECURITY_BLOCK", str(ctx.exception))
 
     def test_3_search_and_quota_cache_protection(self) -> None:
-        # 1차 검색: 캐시 미스 -> 검색 횟수 1 증가 (1/100)
         res1 = self.engine.search_auction_items({"itemName": "아케인셰이드"})
         self.assertFalse(res1["fromCache"])
         self.assertEqual(res1["quota"]["searchUsed"], 1)
         self.assertEqual(res1["quota"]["searchRemaining"], 99)
 
-        # 2차 검색 (세부 조건 변경): 로컬 캐시 히트 -> 검색 횟수 차감 없음 (여전히 1/100)
         res2 = self.engine.search_auction_items(
             {"itemName": "아케인셰이드", "maxPrice": 150_0000_0000}
         )
@@ -57,7 +54,6 @@ class TestMapleAuctionMcp(unittest.TestCase):
         self.assertEqual(summary["medianPrice"], 108_0000_0000)
 
     def test_5_wishlist_and_browser_focus_workflow(self) -> None:
-        # 찜 등록
         add_res = self.engine.manage_wishlist({"action": "add", "itemId": "item-1001"})
         self.assertTrue(add_res["success"])
         self.assertEqual(
@@ -65,12 +61,10 @@ class TestMapleAuctionMcp(unittest.TestCase):
             "https://auction.maplestory.nexon.com/buy",
         )
 
-        # 찜 목록 확인
         wish = self.engine.get_wishlist()
         wish_ids = {it["itemId"] for it in wish["items"]}
         self.assertIn("item-1001", wish_ids)
 
-        # 브라우저 포커스 및 하이라이트
         focus_res = self.engine.open_item_in_browser(
             {"target": "wishlist", "itemId": "item-1001"}
         )
@@ -78,7 +72,6 @@ class TestMapleAuctionMcp(unittest.TestCase):
         self.assertEqual(focus_res["highlightedItemId"], "item-1001")
 
     def test_6_nexon_api_spec_up_simulator(self) -> None:
-        # 캐릭터 장비 대비 경매장 매물 3종 스펙업 시뮬레이션
         comp_res = self.engine.compare_spec_up(
             {"characterName": "낑선", "sortBy": "damage_desc"}
         )
@@ -88,12 +81,59 @@ class TestMapleAuctionMcp(unittest.TestCase):
         top = comp_res["comparisons"][0]
         self.assertGreater(top["estimatedFinalDamageChangePct"], 0)
         self.assertIsNotNone(top["mesoPerOnePctFinalDamage"])
-        print("\n[스펙업 시뮬레이션 결과 요약]")
-        for c in comp_res["comparisons"]:
-            print(
-                f" - {c['candidateItem']['itemName']} ({c['candidateItem']['priceFormatted']} 메소): "
-                f"{c['recommendationSummary']}"
-            )
+
+    def test_7_dom_banner_parser_fixes_nickname_and_meso_vs_combat_power(self) -> None:
+        # 케이스 A: 텍스트 노드가 합쳐진 형태
+        tokens_a = [
+            "MAPLE AUCTION",
+            "검색 횟수 0 / 100 · 판매 횟수 0 / 20",
+            "도움말",
+            "로그아웃",
+            "MVP",
+            "낑선",
+            "Lv.293 | 아크 | 전투력 9761만 8592",
+            "344억 4263만 477",
+            "343",
+            "구매",
+            "판매",
+            "시세",
+        ]
+        parsed_a = parse_auction_banner_tokens(tokens_a)
+        self.assertTrue(parsed_a["loggedIn"])
+        self.assertEqual(parsed_a["character"]["name"], "낑선")
+        self.assertEqual(parsed_a["character"]["level"], 293)
+        self.assertEqual(parsed_a["character"]["job"], "아크")
+        self.assertEqual(parsed_a["character"]["combatPowerFormatted"], "9761만 8592")
+        self.assertEqual(parsed_a["currency"]["mesoFormatted"], "344억 4263만 477")
+        self.assertEqual(parsed_a["currency"]["meso"], 344_4263_0477)
+        self.assertEqual(parsed_a["currency"]["maplePoint"], 343)
+
+        # 케이스 B: 텍스트 노드가 개별 span으로 쪼개진 형태 (삼각형 기호 없어도 닉네임 정상 인식)
+        tokens_b = [
+            "MAPLE AUCTION",
+            "검색 횟수 0 / 100",
+            "판매 횟수 0 / 20",
+            "도움말",
+            "로그아웃",
+            "MVP",
+            "낑선",
+            "Lv.293",
+            "|",
+            "아크",
+            "|",
+            "전투력",
+            "9761만 8592",
+            "344억 4263만 477",
+            "P",
+            "343",
+            "구매",
+            "판매",
+        ]
+        parsed_b = parse_auction_banner_tokens(tokens_b)
+        self.assertEqual(parsed_b["character"]["name"], "낑선")
+        self.assertEqual(parsed_b["character"]["combatPowerFormatted"], "9761만 8592")
+        self.assertEqual(parsed_b["currency"]["mesoFormatted"], "344억 4263만 477")
+        self.assertEqual(parsed_b["currency"]["maplePoint"], 343)
 
 
 if __name__ == "__main__":

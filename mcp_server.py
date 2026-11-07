@@ -3,15 +3,18 @@
 """
 Maple Auction MCP Server (Python 3.11+ Standalone Runner)
 Node.js 미설치 환경에서도 즉시 실행 가능하도록 TypeScript 버전(@maple-auction/mcp-server)과
-동일한 8종 MCP Tool, 100회 검색 보호 캐시, 구매/판매 차단 가드, Nexon Open API 스펙업 시뮬레이터를 제공합니다.
+동일한 8종 MCP Tool, 100회 검색 보호 캐시, 구매/판매 차단 가드, 로컬 브릿지 서버(127.0.0.1:19595),
+Nexon Open API 스펙업 시뮬레이터를 제공합니다.
 """
 
 from __future__ import annotations
+import http.server
 import json
 import math
 import os
 import re
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -64,6 +67,156 @@ def format_meso(meso: float | int) -> str:
         parts.append(f"{rest}")
     res = " ".join(parts)
     return f"-{res}" if neg else res
+
+
+def parse_korean_number(text: str) -> int:
+    if not text:
+        return 0
+    cleaned = re.sub(r",", "", str(text)).strip()
+    if cleaned.isdigit():
+        return int(cleaned)
+
+    total = 0
+    jo = re.search(r"(\d+)\s*조", cleaned)
+    eok = re.search(r"(\d+)\s*억", cleaned)
+    man = re.search(r"(\d+)\s*만", cleaned)
+    if jo:
+        total += int(jo.group(1)) * 1_0000_0000_0000
+    if eok:
+        total += int(eok.group(1)) * 1_0000_0000
+    if man:
+        total += int(man.group(1)) * 1_0000
+
+    rest_text = re.sub(r"(\d+)\s*[조억만]", "", cleaned).strip()
+    rest = re.search(r"(\d+)", rest_text)
+    if rest:
+        total += int(rest.group(1))
+    return total
+
+
+def parse_auction_banner_tokens(tokens: List[str], body_text: str = "") -> Dict[str, Any]:
+    """
+    크롬 확장 프로그램(content.js)과 동일한 DOM 텍스트 노드 기반 배너 파서.
+    "로그아웃"과 "구매" 탭 사이의 토큰만 슬라이스하여:
+    1) "Lv.xxx" 직전 토큰에서 캐릭터 닉네임("낑선") 추출
+    2) "Lv.xxx | 직업 | 전투력 xxx"에서 레벨, 직업, 전투력 추출
+    3) 전투력 토큰 **이후**의 숫자 토큰에서 보유 메소("344억 4263만 477")와 메이플포인트("343")를 분리 추출
+       (전투력을 보유 메소로 오인하는 문제 원천 해결)
+    """
+    full_text = body_text or "\n".join(tokens)
+    is_logged_in = ("로그인이 필요합니다" not in full_text) and ("로그아웃" in full_text)
+
+    sq = re.search(r"검색\s*횟수\s*(\d+)\s*/\s*(\d+)", full_text)
+    slq = re.search(r"판매\s*횟수\s*(\d+)\s*/\s*(\d+)", full_text)
+    search_used = int(sq.group(1)) if sq else 0
+    search_limit = int(sq.group(2)) if sq else 100
+    sell_used = int(slq.group(1)) if slq else 0
+    sell_limit = int(slq.group(2)) if slq else 20
+
+    logout_idx = next((i for i, t in enumerate(tokens) if "로그아웃" in t), -1)
+    buy_idx = next(
+        (i for i, t in enumerate(tokens) if i > logout_idx and t in ("구매", "판매")),
+        -1,
+    )
+    banner_tokens = (
+        tokens[logout_idx + 1 : buy_idx]
+        if (logout_idx != -1 and buy_idx != -1)
+        else tokens[:40]
+    )
+
+    lv_idx = next(
+        (i for i, t in enumerate(banner_tokens) if re.search(r"Lv\.?\s*\d+", t, re.I)),
+        -1,
+    )
+
+    ignored_pre_lv = {
+        "MVP",
+        "브론즈",
+        "실버",
+        "골드",
+        "다이아",
+        "레드",
+        "블랙",
+        "▼",
+        "▲",
+        "|",
+        "·",
+        "도움말",
+        "로그아웃",
+    }
+
+    char_name = None
+    if lv_idx > 0:
+        for i in range(lv_idx - 1, -1, -1):
+            cand = re.sub(r"[▼▲|·]", "", banner_tokens[i]).strip()
+            if cand and cand not in ignored_pre_lv and len(cand) <= 16:
+                char_name = cand
+                break
+
+    level = 0
+    job = ""
+    combat_power_fmt = ""
+    after_combat_idx = lv_idx + 1 if lv_idx != -1 else 0
+
+    if lv_idx != -1:
+        joined_from_lv = " | ".join(banner_tokens[lv_idx:])
+        m = re.search(
+            r"Lv\.?\s*(\d+)\s*[|·\s]+([가-힣A-Za-z()]+)\s*[|·\s]+전투력\s*([0-9조억만,\s]+?)(?=\s*\||$)",
+            joined_from_lv,
+            re.I,
+        )
+        if m:
+            level = int(m.group(1))
+            job = m.group(2).strip()
+            combat_power_fmt = m.group(3).strip()
+
+        cp_idx = next(
+            (i for i in range(lv_idx, len(banner_tokens)) if "전투력" in banner_tokens[i]),
+            -1,
+        )
+        if cp_idx != -1:
+            cp_tok = banner_tokens[cp_idx]
+            inline_num = cp_tok.replace("전투력", "").strip()
+            if inline_num and re.search(r"\d", inline_num):
+                combat_power_fmt = combat_power_fmt or inline_num
+                after_combat_idx = cp_idx + 1
+            elif cp_idx + 1 < len(banner_tokens):
+                combat_power_fmt = combat_power_fmt or banner_tokens[cp_idx + 1].strip()
+                after_combat_idx = cp_idx + 2
+
+    post_combat_tokens = banner_tokens[after_combat_idx:]
+    currency_candidates: List[str] = []
+    for tok in post_combat_tokens:
+        cleaned = re.sub(r"^P\s*", "", tok, flags=re.I).strip()
+        if cleaned and re.match(r"^[0-9,조억만\s]+$", cleaned) and re.search(r"\d", cleaned):
+            currency_candidates.append(cleaned)
+
+    meso_fmt = currency_candidates[0] if len(currency_candidates) > 0 else "0"
+    mp_fmt = currency_candidates[1] if len(currency_candidates) > 1 else "0"
+
+    return {
+        "connected": True,
+        "loggedIn": is_logged_in,
+        "character": {
+            "name": char_name or "확인중",
+            "level": level,
+            "job": job or "-",
+            "combatPower": parse_korean_number(combat_power_fmt),
+            "combatPowerFormatted": combat_power_fmt or "0",
+        },
+        "currency": {
+            "meso": parse_korean_number(meso_fmt),
+            "mesoFormatted": meso_fmt,
+            "maplePoint": parse_korean_number(mp_fmt),
+        },
+        "quota": {
+            "searchUsed": search_used,
+            "searchLimit": search_limit,
+            "searchRemaining": max(0, search_limit - search_used),
+            "sellUsed": sell_used,
+            "sellLimit": sell_limit,
+        },
+    }
 
 
 def assert_allowed_bridge_action(action: str) -> None:
@@ -321,6 +474,9 @@ class MapleAuctionMcpEngine:
         self.search_used = 0
         self.search_limit = 100
         self.ttl_sec = 300
+        self.latest_extension_status: Optional[Dict[str, Any]] = None
+        self.poll_queue: List[Dict[str, Any]] = []
+        self.pending_responses: Dict[str, Dict[str, Any]] = {}
 
     def _get_sample_items(self) -> List[Dict[str, Any]]:
         items = [
@@ -438,6 +594,8 @@ class MapleAuctionMcpEngine:
         return items
 
     def _current_quota(self) -> Dict[str, int]:
+        if self.latest_extension_status and self.latest_extension_status.get("quota"):
+            return self.latest_extension_status["quota"]
         return {
             "searchUsed": self.search_used,
             "searchLimit": self.search_limit,
@@ -448,6 +606,8 @@ class MapleAuctionMcpEngine:
 
     def get_auction_status(self) -> Dict[str, Any]:
         assert_allowed_bridge_action("GET_STATUS")
+        if self.latest_extension_status:
+            return self.latest_extension_status
         return {
             "connected": True,
             "loggedIn": True,
@@ -498,7 +658,6 @@ class MapleAuctionMcpEngine:
                 "expiresAt": now + self.ttl_sec,
             }
 
-        # 로컬 재필터링 (검색 횟수 추가 차감 없음)
         filtered: List[Dict[str, Any]] = []
         for it in raw_items:
             if params.get("minPrice") is not None and it["price"] < params["minPrice"]:
@@ -632,6 +791,13 @@ class MapleAuctionMcpEngine:
         assert_allowed_bridge_action("FOCUS_AND_HIGHLIGHT")
         target = params.get("target", "wishlist")
         item_id = params.get("itemId")
+        req = {
+            "requestId": f"focus-{int(time.time() * 1000)}",
+            "action": "FOCUS_AND_HIGHLIGHT",
+            "payload": {"target": target, "itemId": item_id},
+            "timestamp": int(time.time() * 1000),
+        }
+        self.poll_queue.append(req)
         return {
             "success": True,
             "focusedTabUrl": "https://auction.maplestory.nexon.com/buy",
@@ -787,8 +953,85 @@ class MapleAuctionMcpEngine:
         }
 
 
+def start_local_bridge_http_server(engine: MapleAuctionMcpEngine, port: int = 19595) -> None:
+    class BridgeHandler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            return  # stdio 오염 방지
+
+        def _send_cors(self) -> None:
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+        def do_OPTIONS(self) -> None:
+            self.send_response(204)
+            self._send_cors()
+            self.end_headers()
+
+        def do_GET(self) -> None:
+            if self.path == "/bridge/poll":
+                next_req = engine.poll_queue.pop(0) if engine.poll_queue else None
+                self.send_response(200)
+                self._send_cors()
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"request": next_req}).encode("utf-8"))
+                return
+
+            self.send_response(200)
+            self._send_cors()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(
+                json.dumps(
+                    {
+                        "service": "maple-auction-mcp-bridge",
+                        "extensionConnected": engine.latest_extension_status is not None,
+                        "port": port,
+                    }
+                ).encode("utf-8")
+            )
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                parsed = {}
+
+            if self.path == "/bridge/heartbeat":
+                engine.latest_extension_status = parsed
+            elif self.path == "/bridge/respond":
+                req_id = parsed.get("requestId")
+                if req_id:
+                    engine.pending_responses[req_id] = parsed
+
+            self.send_response(200)
+            self._send_cors()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+
+    def serve() -> None:
+        try:
+            httpd = http.server.ThreadingHTTPServer(("127.0.0.1", port), BridgeHandler)
+            httpd.serve_forever()
+        except Exception:
+            pass
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+
+
 def run_stdio_server() -> None:
     engine = MapleAuctionMcpEngine()
+    start_local_bridge_http_server(engine, 19595)
+
+    if "--bridge-only" in sys.argv:
+        while True:
+            time.sleep(3600)
+
     for raw_line in sys.stdin:
         line = raw_line.strip()
         if not line:
@@ -811,6 +1054,25 @@ def run_stdio_server() -> None:
                         "protocolVersion": "2024-11-05",
                         "capabilities": {"tools": {}},
                         "serverInfo": {"name": "maple-auction-mcp", "version": "1.0.0"},
+                    },
+                }
+                sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
+                sys.stdout.flush()
+            elif method == "tools/list":
+                resp = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "tools": [
+                            {"name": "get_auction_status", "description": "옥션 상태 및 캐릭터/검색 횟수 조회", "inputSchema": {"type": "object", "properties": {}}},
+                            {"name": "search_auction_items", "description": "경매장 매물 검색", "inputSchema": {"type": "object", "properties": {"itemName": {"type": "string"}}, "required": ["itemName"]}},
+                            {"name": "get_market_price", "description": "시세 조회 및 통계 분석", "inputSchema": {"type": "object", "properties": {"itemName": {"type": "string"}}, "required": ["itemName"]}},
+                            {"name": "get_wishlist", "description": "찜목록 조회", "inputSchema": {"type": "object", "properties": {}}},
+                            {"name": "manage_wishlist", "description": "찜 등록/해제", "inputSchema": {"type": "object", "properties": {"action": {"type": "string"}, "itemId": {"type": "string"}}, "required": ["action", "itemId"]}},
+                            {"name": "open_item_in_browser", "description": "크롬 웹 옥션 탭 활성화 및 하이라이트", "inputSchema": {"type": "object", "properties": {"target": {"type": "string"}, "itemId": {"type": "string"}}, "required": ["target"]}},
+                            {"name": "get_my_character_equipment", "description": "Nexon Open API 캐릭터 장착 장비 조회", "inputSchema": {"type": "object", "properties": {"characterName": {"type": "string"}}}},
+                            {"name": "compare_spec_up", "description": "내 캐릭터 장비 대비 경매장 매물 스펙업 비교", "inputSchema": {"type": "object", "properties": {"characterName": {"type": "string"}, "itemId": {"type": "string"}}}},
+                        ]
                     },
                 }
                 sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
