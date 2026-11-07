@@ -109,13 +109,16 @@ function connectWebSocket() {
 
 /**
  * 열려 있는 메이플 옥션 탭(https://auction.maplestory.nexon.com/*) 찾기
+ * 여러 탭이 열려 있을 경우 현재 활성(active) 탭 또는 /buy 탭을 최우선 선택
  */
 async function findMapleAuctionTab() {
   const tabs = await chrome.tabs.query({ url: 'https://auction.maplestory.nexon.com/*' });
-  if (tabs && tabs.length > 0) {
-    return tabs[0];
-  }
-  return null;
+  if (!tabs || tabs.length === 0) return null;
+  return (
+    tabs.find((t) => t.active) ||
+    tabs.find((t) => t.url && t.url.includes('/buy')) ||
+    tabs[0]
+  );
 }
 
 /**
@@ -197,8 +200,17 @@ async function handleBridgeRequest(request) {
 // Content Script 및 Popup 메시지 리스너
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'AUCTION_STATUS_HEARTBEAT' && msg.status) {
-    latestAuctionStatus = msg.status;
-    chrome.storage.local.set({ latestAuctionStatus });
+    // 다른 비로그인 탭(https://auction.maplestory.nexon.com/)이 로그인된 /buy 탭의 캐릭터 정보를 덮어쓰지 않도록 보호
+    const incomingHasChar = Boolean(msg.status.character && msg.status.character.level > 0);
+    const existingHasChar = Boolean(latestAuctionStatus?.character && latestAuctionStatus.character.level > 0);
+    const existingAgeMs = latestAuctionStatus?.lastUpdated
+      ? Date.now() - new Date(latestAuctionStatus.lastUpdated).getTime()
+      : Infinity;
+
+    if (incomingHasChar || !existingHasChar || existingAgeMs > 10000) {
+      latestAuctionStatus = msg.status;
+      chrome.storage.local.set({ latestAuctionStatus });
+    }
 
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'HEARTBEAT', status: latestAuctionStatus }));

@@ -631,6 +631,14 @@ class MapleAuctionMcpEngine:
         assert_allowed_bridge_action("GET_STATUS")
         if self.latest_extension_status:
             return self.latest_extension_status
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:19595/bridge/status", timeout=1.5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if data and data.get("status"):
+                    self.latest_extension_status = data["status"]
+                    return data["status"]
+        except Exception:
+            pass
         return {
             "connected": True,
             "loggedIn": True,
@@ -1217,15 +1225,28 @@ def run_stdio_server() -> None:
 
         try:
             if method == "initialize":
+                client_proto = params.get("protocolVersion") or "2024-11-05"
                 resp = {
                     "jsonrpc": "2.0",
                     "id": req_id,
                     "result": {
-                        "protocolVersion": "2024-11-05",
+                        "protocolVersion": client_proto,
                         "capabilities": {"tools": {}},
                         "serverInfo": {"name": "maple-auction-mcp", "version": "1.0.0"},
                     },
                 }
+                sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
+                sys.stdout.flush()
+            elif method == "ping":
+                resp = {"jsonrpc": "2.0", "id": req_id, "result": {}}
+                sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
+                sys.stdout.flush()
+            elif method == "resources/list":
+                resp = {"jsonrpc": "2.0", "id": req_id, "result": {"resources": []}}
+                sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
+                sys.stdout.flush()
+            elif method == "prompts/list":
+                resp = {"jsonrpc": "2.0", "id": req_id, "result": {"prompts": []}}
                 sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
                 sys.stdout.flush()
             elif method == "tools/list":
@@ -1279,6 +1300,14 @@ def run_stdio_server() -> None:
                             {"type": "text", "text": json.dumps(out, ensure_ascii=False, indent=2)}
                         ]
                     },
+                }
+                sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
+                sys.stdout.flush()
+            elif req_id is not None:
+                resp = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32601, "message": f"Method not found: {method}"},
                 }
                 sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
                 sys.stdout.flush()
