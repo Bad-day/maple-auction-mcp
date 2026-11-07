@@ -125,7 +125,11 @@ def parse_auction_banner_tokens(tokens: List[str], body_text: str = "") -> Dict[
     )
 
     lv_idx = next(
-        (i for i, t in enumerate(banner_tokens) if re.search(r"Lv\.?\s*\d+", t, re.I)),
+        (
+            i
+            for i, t in enumerate(banner_tokens)
+            if re.match(r"^Lv\.?(\s*\d+)?$", t.strip(), re.I) or re.match(r"^Lv\.", t.strip(), re.I)
+        ),
         -1,
     )
 
@@ -156,33 +160,52 @@ def parse_auction_banner_tokens(tokens: List[str], body_text: str = "") -> Dict[
     level = 0
     job = ""
     combat_power_fmt = ""
-    after_combat_idx = lv_idx + 1 if lv_idx != -1 else 0
+    after_combat_idx = 0
 
     if lv_idx != -1:
-        joined_from_lv = " | ".join(banner_tokens[lv_idx:])
-        m = re.search(
-            r"Lv\.?\s*(\d+)\s*[|·\s]+([가-힣A-Za-z()]+)\s*[|·\s]+전투력\s*([0-9조억만,\s]+?)(?=\s*\||$)",
-            joined_from_lv,
-            re.I,
-        )
-        if m:
-            level = int(m.group(1))
-            job = m.group(2).strip()
-            combat_power_fmt = m.group(3).strip()
+        lv_token = banner_tokens[lv_idx].strip()
+        inline_lv = re.search(r"Lv\.?\s*(\d+)", lv_token, re.I)
+        job_start_idx = lv_idx + 1
+
+        if inline_lv:
+            level = int(inline_lv.group(1))
+            single_m = re.search(
+                r"Lv\.?\s*(\d+)\s*[|·\s]+([가-힣A-Za-z()]+)\s*[|·\s]+전투력\s*([0-9조억만,\s]+)",
+                lv_token,
+                re.I,
+            )
+            if single_m:
+                job = single_m.group(2).strip()
+                combat_power_fmt = single_m.group(3).strip()
+                after_combat_idx = lv_idx + 1
+        elif lv_idx + 1 < len(banner_tokens) and banner_tokens[lv_idx + 1].strip().isdigit():
+            level = int(banner_tokens[lv_idx + 1].strip())
+            job_start_idx = lv_idx + 2
 
         cp_idx = next(
             (i for i in range(lv_idx, len(banner_tokens)) if "전투력" in banner_tokens[i]),
             -1,
         )
         if cp_idx != -1:
-            cp_tok = banner_tokens[cp_idx]
-            inline_num = cp_tok.replace("전투력", "").strip()
-            if inline_num and re.search(r"\d", inline_num):
-                combat_power_fmt = combat_power_fmt or inline_num
+            if not job:
+                for i in range(job_start_idx, cp_idx):
+                    tok = re.sub(r"[|·]", "", banner_tokens[i]).strip()
+                    if tok and not tok.isdigit():
+                        job = tok
+                        break
+
+            cp_tok = banner_tokens[cp_idx].strip()
+            inline_cp = re.sub(r"[|·]", "", cp_tok.split("전투력", 1)[1] if "전투력" in cp_tok else "").strip()
+            if inline_cp and re.search(r"\d", inline_cp):
+                combat_power_fmt = inline_cp
                 after_combat_idx = cp_idx + 1
-            elif cp_idx + 1 < len(banner_tokens):
-                combat_power_fmt = combat_power_fmt or banner_tokens[cp_idx + 1].strip()
-                after_combat_idx = cp_idx + 2
+            else:
+                for i in range(cp_idx + 1, len(banner_tokens)):
+                    cand_cp = re.sub(r"[|·]", "", banner_tokens[i]).strip()
+                    if cand_cp and re.search(r"\d", cand_cp):
+                        combat_power_fmt = cand_cp
+                        after_combat_idx = i + 1
+                        break
 
     post_combat_tokens = banner_tokens[after_combat_idx:]
     currency_candidates: List[str] = []

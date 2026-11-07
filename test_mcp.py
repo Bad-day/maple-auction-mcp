@@ -135,6 +135,33 @@ class TestMapleAuctionMcp(unittest.TestCase):
         self.assertEqual(parsed_b["currency"]["mesoFormatted"], "344억 4263만 477")
         self.assertEqual(parsed_b["currency"]["maplePoint"], 343)
 
+        # 케이스 C: 실제 웹 옥션 DOM처럼 "Lv."와 "293"까지 별도 텍스트 노드로 분리된 형태
+        tokens_c = [
+            "MAPLE AUCTION",
+            "검색 횟수 0 / 100",
+            "판매 횟수 0 / 20",
+            "도움말",
+            "로그아웃",
+            "MVP",
+            "낑선",
+            "Lv.",
+            "293",
+            "아크",
+            "전투력",
+            "9761만 8592",
+            "344억 4263만 477",
+            "343",
+            "구매",
+            "판매",
+        ]
+        parsed_c = parse_auction_banner_tokens(tokens_c)
+        self.assertEqual(parsed_c["character"]["name"], "낑선")
+        self.assertEqual(parsed_c["character"]["level"], 293)
+        self.assertEqual(parsed_c["character"]["job"], "아크")
+        self.assertEqual(parsed_c["character"]["combatPowerFormatted"], "9761만 8592")
+        self.assertEqual(parsed_c["currency"]["mesoFormatted"], "344억 4263만 477")
+        self.assertEqual(parsed_c["currency"]["maplePoint"], 343)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

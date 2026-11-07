@@ -39,7 +39,7 @@
   }
 
   /**
-   * DOM 내 모든 텍스트 노드를 순서대로 배열로 수집 (노드 간 텍스트가 합쳐지지 않도록 분리)
+   * DOM 내 모든 텍스트 노드를 순서대로 배열로 수집
    */
   function collectOrderedTextTokens() {
     const tokens = [];
@@ -66,11 +66,10 @@
   }
 
   /**
-   * 웹 옥션 상단 배너에서 검색 횟수(0/100), 캐릭터(닉네임, 레벨, 직업, 전투력), 보유 메소, 메이플포인트를 정확히 파싱
-   *
-   * 화면 구조 (텍스트 노드 순서):
-   * ... -> "로그아웃" -> ["MVP"] -> "낑선" -> "Lv.293" | "아크" | "전투력 9761만 8592"
-   *     -> "344억 4263만 477" (보유 메소) -> "343" (메이플포인트) -> "구매" -> "판매" ...
+   * 웹 옥션 상단 배너 파서
+   * 실제 웹 옥션 DOM 텍스트 노드 분리 구조:
+   * ["MVP", "낑선", "Lv.", "293", "아크", "전투력", "9761만 8592", "344억 4263만 477", "343"]
+   * ("Lv."와 "293", "전투력"과 "9761만 8592"가 별도 텍스트 노드로 분리되어 있음)
    */
   function parseAuctionDomStatus() {
     const bodyText = document.body?.innerText || '';
@@ -97,10 +96,10 @@
         ? tokens.slice(logoutIdx + 1, buyTabIdx)
         : tokens.slice(0, 40);
 
-    // 3. 레벨("Lv.293") 위치 탐색
-    const lvIdx = bannerTokens.findIndex((t) => /Lv\.?\s*\d+/i.test(t));
+    // 3. "Lv." 또는 "Lv.293" 노드 위치 찾기 ("Lv." 단독 텍스트 노드도 정확히 매칭!)
+    const lvIdx = bannerTokens.findIndex((t) => /^Lv\.?(\s*\d+)?$/i.test(t.trim()) || /^Lv\./i.test(t.trim()));
 
-    // 4. 캐릭터 닉네임 추출: "로그아웃" 뒤 ~ "Lv.293" 앞의 토큰 중 MVP/기호를 제외한 마지막 텍스트 ("낑선")
+    // 4. 캐릭터 닉네임 추출: "Lv." 직전 토큰 ("낑선")
     const ignoredPreLvTokens = new Set([
       'MVP',
       '브론즈',
@@ -128,54 +127,74 @@
       }
     }
 
-    // 5. 레벨, 직업, 전투력 추출
+    // 5. 레벨("293"), 직업("아크"), 전투력("9761만 8592") 추출
     let level = 0;
     let job = '';
     let combatPowerFormatted = '';
-    let afterCombatTokenIdx = lvIdx !== -1 ? lvIdx + 1 : 0;
+    let afterCombatTokenIdx = 0;
 
     if (lvIdx !== -1) {
-      // Lv.293 | 아크 | 전투력 9761만 8592 가 한 노드에 있거나 여러 노드로 나뉜 경우 모두 대응
-      const joinedFromLv = bannerTokens.slice(lvIdx).join(' | ');
-      const fullCharMatch = joinedFromLv.match(
-        /Lv\.?\s*(\d+)\s*[|·\s]+([가-힣A-Za-z()]+)\s*[|·\s]+전투력\s*([0-9조억만,\s]+?)(?=\s*\||$)/i
-      );
+      const lvToken = bannerTokens[lvIdx].trim();
+      const inlineLvMatch = lvToken.match(/Lv\.?\s*(\d+)/i);
+      let jobStartIdx = lvIdx + 1;
 
-      if (fullCharMatch) {
-        level = Number(fullCharMatch[1]);
-        job = fullCharMatch[2].trim();
-        combatPowerFormatted = fullCharMatch[3].trim();
-      } else {
-        const lvMatch = bannerTokens[lvIdx].match(/Lv\.?\s*(\d+)/i);
-        if (lvMatch) level = Number(lvMatch[1]);
+      if (inlineLvMatch) {
+        level = Number(inlineLvMatch[1]);
+        // 만약 한 노드에 "Lv.293 | 아크 | 전투력 9761만 8592"가 통째로 들어있는 경우
+        const singleNodeMatch = lvToken.match(
+          /Lv\.?\s*(\d+)\s*[|·\s]+([가-힣A-Za-z()]+)\s*[|·\s]+전투력\s*([0-9조억만,\s]+)/i
+        );
+        if (singleNodeMatch) {
+          job = singleNodeMatch[2].trim();
+          combatPowerFormatted = singleNodeMatch[3].trim();
+          afterCombatTokenIdx = lvIdx + 1;
+        }
+      } else if (lvIdx + 1 < bannerTokens.length && /^\d+$/.test(bannerTokens[lvIdx + 1].trim())) {
+        // "Lv." 노드 바로 다음 노드가 "293"인 경우
+        level = Number(bannerTokens[lvIdx + 1].trim());
+        jobStartIdx = lvIdx + 2;
       }
 
-      // 전투력 텍스트가 끝나는 토큰 인덱스 찾기 (그 이후 토큰들이 메소와 메이플포인트임!)
+      // "전투력" 토큰 찾기
       const cpTokenIdx = bannerTokens.findIndex((t, idx) => idx >= lvIdx && t.includes('전투력'));
       if (cpTokenIdx !== -1) {
-        const cpToken = bannerTokens[cpTokenIdx];
-        const inlineNum = cpToken.replace('전투력', '').trim();
-        if (inlineNum && /[0-9]/.test(inlineNum)) {
-          combatPowerFormatted = combatPowerFormatted || inlineNum;
+        // 레벨 토큰과 "전투력" 토큰 사이에 있는 직업명("아크") 추출
+        if (!job) {
+          for (let i = jobStartIdx; i < cpTokenIdx; i++) {
+            const tok = bannerTokens[i].replace(/[|·]/g, '').trim();
+            if (tok && !/^\d+$/.test(tok)) {
+              job = tok;
+              break;
+            }
+          }
+        }
+
+        const cpToken = bannerTokens[cpTokenIdx].trim();
+        const inlineCp = (cpToken.split('전투력')[1] || '').replace(/[|·]/g, '').trim();
+        if (inlineCp && /[0-9]/.test(inlineCp)) {
+          // "전투력 9761만 8592"가 한 노드인 경우
+          combatPowerFormatted = inlineCp;
           afterCombatTokenIdx = cpTokenIdx + 1;
-        } else if (cpTokenIdx + 1 < bannerTokens.length) {
-          combatPowerFormatted = combatPowerFormatted || bannerTokens[cpTokenIdx + 1].trim();
-          afterCombatTokenIdx = cpTokenIdx + 2;
+        } else {
+          // "전투력" 다음 노드가 "9761만 8592"인 경우
+          for (let i = cpTokenIdx + 1; i < bannerTokens.length; i++) {
+            const candidateCp = bannerTokens[i].replace(/[|·]/g, '').trim();
+            if (candidateCp && /[0-9]/.test(candidateCp)) {
+              combatPowerFormatted = candidateCp;
+              afterCombatTokenIdx = i + 1;
+              break;
+            }
+          }
         }
       }
     }
 
-    // 6. 보유 메소 & 메이플포인트 추출: 전투력 토큰 이후 ~ "구매" 탭 이전의 숫자/단위 토큰
+    // 6. 보유 메소 & 메이플포인트 추출: 전투력 값 노드(afterCombatTokenIdx) **직후**부터의 숫자 토큰들
     const postCombatTokens = bannerTokens.slice(afterCombatTokenIdx);
     const currencyCandidates = [];
     for (const tok of postCombatTokens) {
       const cleaned = tok.replace(/^P\s*/i, '').trim();
-      // 숫자로 구성되거나 조/억/만 단위가 포함된 재화 문자열만 추출
-      if (
-        cleaned &&
-        /^[0-9,조억만\s]+$/.test(cleaned) &&
-        /[0-9]/.test(cleaned)
-      ) {
+      if (cleaned && /^[0-9,조억만\s]+$/.test(cleaned) && /[0-9]/.test(cleaned)) {
         currencyCandidates.push(cleaned);
       }
     }
@@ -287,7 +306,6 @@
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message) return false;
 
-    // 팝업에서 즉시 현재 페이지 상태를 요청하는 경우
     if (message.type === 'GET_LIVE_DOM_STATUS') {
       const status = parseAuctionDomStatus();
       sendResponse({ ok: true, status });
@@ -417,7 +435,6 @@
     }
   }
 
-  // 페이지 로드 직후 즉시 전송 + 2초 간격 업데이트
   sendImmediateHeartbeat();
   setTimeout(sendImmediateHeartbeat, 600);
   setInterval(sendImmediateHeartbeat, 2500);
