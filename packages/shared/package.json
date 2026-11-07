@@ -1,0 +1,10 @@
+{
+  "name": "@maple-auction/shared",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./dist/types.js",
+  "types": "./dist/types.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  }
+}

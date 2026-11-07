@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>Maple Auction MCP Bridge</title>
+  <style>
+    body {
+      width: 340px;
+      margin: 0;
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans KR", sans-serif;
+      background-color: #1e2230;
+      color: #f3f4f6;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #33394f;
+    }
+    .title {
+      font-weight: 700;
+      font-size: 15px;
+      color: #a3e635;
+    }
+    .badge {
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .badge.ok {
+      background: rgba(163, 230, 53, 0.15);
+      color: #a3e635;
+    }
+    .badge.off {
+      background: rgba(248, 113, 113, 0.15);
+      color: #f87171;
+    }
+    .card {
+      background: #282d3f;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 10px;
+      font-size: 13px;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 6px;
+    }
+    .row:last-child {
+      margin-bottom: 0;
+    }
+    .label {
+      color: #9ca3af;
+    }
+    .val {
+      font-weight: 600;
+      color: #f9fafb;
+    }
+    .security-box {
+      background: rgba(56, 189, 248, 0.1);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 11.5px;
+      color: #bae6fd;
+      line-height: 1.4;
+      margin-bottom: 12px;
+    }
+    button {
+      width: 100%;
+      padding: 9px;
+      border: none;
+      border-radius: 6px;
+      background: #f59e0b;
+      color: #111827;
+      font-weight: 700;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    button:hover {
+      background: #d97706;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <span class="title">MAPLE AUCTION MCP</span>
+    <span id="statusBadge" class="badge off">확인 중...</span>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <span class="label">캐릭터</span>
+      <span id="charInfo" class="val">미연결</span>
+    </div>
+    <div class="row">
+      <span class="label">보유 메소</span>
+      <span id="mesoInfo" class="val">-</span>
+    </div>
+    <div class="row">
+      <span class="label">일일 검색 횟수</span>
+      <span id="quotaInfo" class="val">0 / 100</span>
+    </div>
+  </div>
+
+  <div class="security-box">
+    🔒 <strong>안전 모드 활성화됨:</strong><br/>
+    직접 구매/판매(메소 결제) API는 원천 차단되어 있으며, 매물 검색·시세 분석·찜 등록·탭 포커스만 허용됩니다.
+  </div>
+
+  <button id="openAuctionBtn">메이플 웹 옥션 열기 / 포커스</button>
+  <script src="popup.js"></script>
+</body>
+</html>

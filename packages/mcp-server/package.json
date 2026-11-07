@@ -1,0 +1,17 @@
+{
+  "name": "@maple-auction/mcp-server",
+  "version": "1.0.0",
+  "description": "MapleStory Web Auction MCP Server with Chrome Bridge & Nexon Open API Spec-Up Simulator",
+  "type": "module",
+  "bin": {
+    "maple-auction-mcp": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node ./dist/index.js"
+  },
+  "dependencies": {
+    "@maple-auction/shared": "1.0.0"
+  }
+}
