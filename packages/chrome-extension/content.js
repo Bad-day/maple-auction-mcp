@@ -302,6 +302,34 @@
     };
   }
 
+  /**
+   * 웹 옥션 상단 배너 우측의 재화/세션 새로고침 아이콘 버튼 클릭 후 최신 DOM 상태 반환
+   */
+  async function triggerBannerSessionRefresh() {
+    try {
+      // 배너 영역(구매 탭 상단, y < 160px)에 위치한 아이콘 전용 새로고침 버튼 탐색 및 클릭
+      const buttons = Array.from(document.querySelectorAll('button'));
+      const bannerRefreshBtn = buttons.find((btn) => {
+        const rect = btn.getBoundingClientRect();
+        const txt = (btn.textContent || '').trim();
+        return rect.top > 30 && rect.top < 150 && rect.left > 500 && txt.length === 0;
+      });
+      if (bannerRefreshBtn) {
+        bannerRefreshBtn.click();
+        await new Promise((r) => setTimeout(r, 450));
+      }
+    } catch {
+      // ignore click error
+    }
+    const status = parseAuctionDomStatus();
+    try {
+      chrome.runtime.sendMessage({ type: 'AUCTION_STATUS_HEARTBEAT', status });
+    } catch {
+      // ignore
+    }
+    return status;
+  }
+
   // Background Service Worker 및 Popup으로부터 메시지 수신
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message) return false;
@@ -310,6 +338,13 @@
       const status = parseAuctionDomStatus();
       sendResponse({ ok: true, status });
       return false;
+    }
+
+    if (message.type === 'REFRESH_AUCTION_SESSION') {
+      triggerBannerSessionRefresh().then((status) => {
+        sendResponse({ ok: true, status });
+      });
+      return true;
     }
 
     if (message.type !== 'MCP_BRIDGE_REQUEST') return false;
