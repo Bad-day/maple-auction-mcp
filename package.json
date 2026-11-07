@@ -1,0 +1,17 @@
+{
+  "name": "maple-auction-mcp-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MapleStory Web Auction (auction.maplestory.nexon.com) MCP Server & Chrome Extension Bridge with Nexon Open API Spec-Up Simulator",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "start": "npm --workspace=@maple-auction/mcp-server run start",
+    "test": "npm --workspace=@maple-auction/mcp-server run test"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
