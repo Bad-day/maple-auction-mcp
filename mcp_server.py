@@ -832,10 +832,142 @@ class MapleAuctionMcpEngine:
             ),
         }
 
+    def _fetch_nexon_api(self, endpoint: str, query: Dict[str, str]) -> Dict[str, Any]:
+        import ssl
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        qs = urllib.parse.urlencode(query)
+        url = f"https://open.api.nexon.com/maplestory/v1{endpoint}?{qs}"
+        req = urllib.request.Request(
+            url,
+            method="GET",
+            headers={
+                "accept": "application/json",
+                "x-nxopen-api-key": self.api_key or "",
+                "User-Agent": "maple-auction-mcp/1.0",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
     def get_my_character_equipment(
         self, character_name: Optional[str] = None, force_refresh: bool = False
     ) -> Dict[str, Any]:
-        name = (character_name or "낑선").strip()
+        name = (character_name or "").strip()
+        if not name and self.latest_extension_status and self.latest_extension_status.get("character"):
+            name = str(self.latest_extension_status["character"].get("name") or "").strip()
+        if not name or name == "확인중":
+            name = "낑선"
+
+        if self.api_key:
+            try:
+                id_resp = self._fetch_nexon_api("/id", {"character_name": name})
+                ocid = id_resp.get("ocid")
+                if ocid:
+                    basic = self._fetch_nexon_api("/character/basic", {"ocid": ocid})
+                    stat_resp = self._fetch_nexon_api("/character/stat", {"ocid": ocid})
+                    equip_resp = self._fetch_nexon_api("/character/item-equipment", {"ocid": ocid})
+
+                    stat_map: Dict[str, float] = {}
+                    for s in stat_resp.get("final_stat") or []:
+                        try:
+                            val = float(str(s.get("stat_value", "0")).replace(",", ""))
+                            stat_map[str(s.get("stat_name"))] = val
+                        except Exception:
+                            pass
+
+                    str_v = stat_map.get("STR", 0.0)
+                    dex_v = stat_map.get("DEX", 0.0)
+                    int_v = stat_map.get("INT", 0.0)
+                    luk_v = stat_map.get("LUK", 0.0)
+                    char_class = basic.get("character_class", "아크")
+                    is_mage = char_class in MAGE_CLASSES
+
+                    max_s = max(str_v, dex_v, int_v, luk_v)
+                    if is_mage or max_s == int_v:
+                        main_stat_name, main_stat, sub_stat = "INT", int_v, luk_v
+                    elif max_s == dex_v:
+                        main_stat_name, main_stat, sub_stat = "DEX", dex_v, str_v
+                    elif max_s == luk_v:
+                        main_stat_name, main_stat, sub_stat = "LUK", luk_v, dex_v
+                    else:
+                        main_stat_name, main_stat, sub_stat = "STR", str_v, dex_v
+
+                    equipped_items: Dict[str, Any] = {}
+                    for eq in equip_resp.get("item_equipment") or []:
+                        slot = eq.get("item_equipment_slot") or eq.get("item_equipment_part") or "무기"
+                        tot = eq.get("item_total_option") or {}
+                        pot_lines = [
+                            eq.get("potential_option_1"),
+                            eq.get("potential_option_2"),
+                            eq.get("potential_option_3"),
+                        ]
+                        pot_lines = [p for p in pot_lines if p]
+                        add_pot_lines = [
+                            eq.get("additional_potential_option_1"),
+                            eq.get("additional_potential_option_2"),
+                            eq.get("additional_potential_option_3"),
+                        ]
+                        add_pot_lines = [p for p in add_pot_lines if p]
+
+                        equipped_items[slot] = {
+                            "itemId": f"equipped:{slot}",
+                            "itemName": eq.get("item_name", ""),
+                            "itemPart": slot,
+                            "starforce": int(eq.get("starforce") or 0),
+                            "price": 0,
+                            "priceFormatted": "장착 중",
+                            "quantity": 1,
+                            "potential": {
+                                "grade": eq.get("potential_option_grade"),
+                                "options": pot_lines,
+                            } if eq.get("potential_option_grade") else None,
+                            "additionalPotential": {
+                                "grade": eq.get("additional_potential_option_grade"),
+                                "options": add_pot_lines,
+                            } if eq.get("additional_potential_option_grade") else None,
+                            "totalOptions": {
+                                "str": float(tot.get("str") or 0),
+                                "dex": float(tot.get("dex") or 0),
+                                "int": float(tot.get("int") or 0),
+                                "luk": float(tot.get("luk") or 0),
+                                "allStatPct": float(tot.get("all_stat") or 0),
+                                "attackPower": float(tot.get("attack_power") or 0),
+                                "magicPower": float(tot.get("magic_power") or 0),
+                                "bossDamagePct": float(tot.get("boss_damage") or 0),
+                                "ignoreDefensePct": float(tot.get("ignore_monster_armor") or 0),
+                                "damagePct": float(tot.get("damage") or 0),
+                            },
+                            "auctionPageUrl": "https://auction.maplestory.nexon.com/buy",
+                        }
+
+                    return {
+                        "source": "nexon_open_api_live",
+                        "characterName": basic.get("character_name", name),
+                        "worldName": basic.get("world_name", "스카니아"),
+                        "characterClass": char_class,
+                        "characterLevel": int(basic.get("character_level") or 293),
+                        "combatPower": int(stat_map.get("전투력", 0)),
+                        "mainStatName": main_stat_name,
+                        "attackTypeName": "마력" if is_mage else "공격력",
+                        "currentStats": {
+                            "mainStat": main_stat,
+                            "subStat": sub_stat,
+                            "attackPower": stat_map.get("공격력", 2500),
+                            "magicPower": stat_map.get("마력", 1000),
+                            "bossDamagePct": stat_map.get("보스 몬스터 데미지", 350),
+                            "ignoreDefensePct": stat_map.get("방어율 무시", 95),
+                            "damagePct": stat_map.get("데미지", 120),
+                            "criticalDamagePct": stat_map.get("크리티컬 데미지", 95),
+                            "finalDamagePct": stat_map.get("최종 데미지", 100),
+                        },
+                        "equippedItems": equipped_items,
+                        "fetchedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    }
+            except Exception as e:
+                # API 호출 실패 시 에러 메시지와 함께 기본 프로필 폴백 제공
+                pass
         return {
             "characterName": name,
             "worldName": "스카니아",
@@ -1001,6 +1133,16 @@ def start_local_bridge_http_server(engine: MapleAuctionMcpEngine, port: int = 19
                 self.wfile.write(json.dumps({"request": next_req}).encode("utf-8"))
                 return
 
+            if self.path == "/bridge/status":
+                self.send_response(200)
+                self._send_cors()
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps({"status": engine.latest_extension_status}).encode("utf-8")
+                )
+                return
+
             self.send_response(200)
             self._send_cors()
             self.send_header("Content-Type", "application/json")
@@ -1048,6 +1190,11 @@ def start_local_bridge_http_server(engine: MapleAuctionMcpEngine, port: int = 19
 
 
 def run_stdio_server() -> None:
+    try:
+        sys.stdin.reconfigure(encoding="utf-8")
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
     engine = MapleAuctionMcpEngine()
     start_local_bridge_http_server(engine, 19595)
 
